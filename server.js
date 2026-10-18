@@ -5,7 +5,9 @@ import path from 'path';
 import multer from 'multer';
 
 const app = express();
-const PORT = 3000;
+
+// Render ap bay pò li otomatikman, si w lokal l ap pran 3000
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
@@ -45,7 +47,13 @@ app.get('/api/dishes', (req, res) => res.json(readJSON(dishesPath)));
 app.post('/api/dishes', upload.single('image'), (req, res) => {
   const { name, category, price, description } = req.body;
   let imageUrl = 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&auto=format&fit=crop&q=80';
-  if (req.file) imageUrl = `http://localhost:3000/uploads/${req.file.filename}`;
+  
+  // Sèvi ak URL dinamik Render anplase localhost
+  if (req.file) {
+    const protocol = req.protocol;
+    const host = req.get('host');
+    imageUrl = `${protocol}://${host}/uploads/${req.file.filename}`;
+  }
 
   const dishes = readJSON(dishesPath);
   const newDish = { id: Date.now(), name, category, price: Number(price), description: description || '', image: imageUrl, available: true };
@@ -62,7 +70,11 @@ app.put('/api/dishes/:id', upload.single('image'), (req, res) => {
   if (index === -1) return res.status(404).json({ error: 'Plato no encontrado' });
 
   let imageUrl = dishes[index].image;
-  if (req.file) imageUrl = `http://localhost:3000/uploads/${req.file.filename}`;
+  if (req.file) {
+    const protocol = req.protocol;
+    const host = req.get('host');
+    imageUrl = `${protocol}://${host}/uploads/${req.file.filename}`;
+  }
 
   dishes[index] = {
     ...dishes[index],
@@ -128,4 +140,4 @@ app.patch('/api/orders/:id/status', (req, res) => {
   res.json({ message: 'Estado del pedido actualizado', order: orders[index] });
 });
 
-app.listen(PORT, () => console.log(`🚀 Sèvè Dorce Resto ap mache sou: http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Sèvè Dorce Resto ap mache sou pò: ${PORT}`));
