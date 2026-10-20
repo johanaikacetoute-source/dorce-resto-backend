@@ -1,26 +1,59 @@
 import express from 'express';
 import cors from 'cors';
-import fs from 'fs';
 import path from 'path';
 import multer from 'multer';
+import pkg from 'pg';
+const { Pool } = pkg;
 
 const app = express();
-
-// Render ap bay pò li otomatikman, si w lokal l ap pran 3000
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(path.resolve('uploads')));
 
-const dataDir = path.resolve('data');
+// Configuración de la conexión a PostgreSQL con la variable de entorno de Render
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+// Función para inicializar las tablas en la base de datos automáticamente al encender
+async function initDB() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS dishes (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        category VARCHAR(100) NOT NULL,
+        price NUMERIC NOT NULL,
+        description TEXT,
+        image TEXT,
+        available BOOLEAN DEFAULT TRUE
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS orders (
+        id VARCHAR(100) PRIMARY KEY,
+        client_name VARCHAR(255) NOT NULL,
+        address TEXT NOT NULL,
+        items JSONB NOT NULL,
+        total NUMERIC NOT NULL,
+        status VARCHAR(50) DEFAULT 'Pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log("📦 Tablas de PostgreSQL creadas o verificadas con éxito.");
+  } catch (err) {
+    console.error("Error al inicializar la base de datos:", err);
+  }
+}
+initDB();
+
 const uploadsDir = path.resolve('uploads');
-
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+import fs from 'fs';
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-
-const dishesPath = path.join(dataDir, 'dishes.json');
-const ordersPath = path.join(dataDir, 'orders.json');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadsDir),
@@ -31,113 +64,137 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-const readJSON = (filePath) => {
-  if (!fs.existsSync(filePath)) return [];
-  const data = fs.readFileSync(filePath, 'utf8');
-  return JSON.parse(data || '[]');
-};
-
-const writeJSON = (filePath, data) => {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
-};
-
 // --- RUTAS PLATOS ---
-app.get('/api/dishes', (req, res) => res.json(readJSON(dishesPath)));
-
-app.post('/api/dishes', upload.single('image'), (req, res) => {
-  const { name, category, price, description } = req.body;
-  let imageUrl = 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&auto=format&fit=crop&q=80';
-  
-  // Sèvi ak URL dinamik Render anplase localhost
-  if (req.file) {
-    const protocol = req.protocol;
-    const host = req.get('host');
-    imageUrl = `${protocol}://${host}/uploads/${req.file.filename}`;
+app.get('/api/dishes', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM dishes ORDER BY id DESC');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  const dishes = readJSON(dishesPath);
-  const newDish = { id: Date.now(), name, category, price: Number(price), description: description || '', image: imageUrl, available: true };
-  dishes.push(newDish);
-  writeJSON(dishesPath, dishes);
-  res.status(201).json({ message: 'Plato agregado', dish: newDish });
 });
 
-app.put('/api/dishes/:id', upload.single('image'), (req, res) => {
-  const { id } = req.params;
-  const { name, category, price, description, available } = req.body;
-  let dishes = readJSON(dishesPath);
-  const index = dishes.findIndex(d => String(d.id) === String(id));
-  if (index === -1) return res.status(404).json({ error: 'Plato no encontrado' });
+app.post('/api/dishes', upload.single('image'), async (req, res) => {
+  try {
+    const { name, category, price, description } = req.body;
+    let imageUrl = 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&auto=format&fit=crop&q=80';
+    
+    if (req.file) {
+      imageUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    }
 
-  let imageUrl = dishes[index].image;
-  if (req.file) {
-    const protocol = req.protocol;
-    const host = req.get('host');
-    imageUrl = `${protocol}://${host}/uploads/${req.file.filename}`;
+    const query = `
+      INSERT INTO dishes (name, category, price, description, image, available) 
+      VALUES ($1, $2, $3, $4, $5, true) RETURNING *;
+    `;
+    const values = [name, category, Number(price), description || '', imageUrl];
+    const newDish = await pool.query(query, values);
+
+    res.status(201).json({ message: 'Plato agregado', dish: newDish.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  dishes[index] = {
-    ...dishes[index],
-    name: name || dishes[index].name,
-    category: category || dishes[index].category,
-    price: price ? Number(price) : dishes[index].price,
-    description: description !== undefined ? description : dishes[index].description,
-    image: imageUrl,
-    available: available !== undefined ? (available === 'true' || available === true) : dishes[index].available
-  };
-  writeJSON(dishesPath, dishes);
-  res.json({ message: 'Plato actualizado', dish: dishes[index] });
 });
 
-app.patch('/api/dishes/:id/toggle-available', (req, res) => {
-  const { id } = req.params;
-  let dishes = readJSON(dishesPath);
-  const index = dishes.findIndex(d => String(d.id) === String(id));
-  if (index === -1) return res.status(404).json({ error: 'Plato no encontrado' });
+app.put('/api/dishes/:id', upload.single('image'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, category, price, description, available } = req.body;
 
-  dishes[index].available = !dishes[index].available;
-  writeJSON(dishesPath, dishes);
-  res.json({ message: 'Estado actualizado', available: dishes[index].available });
+    const current = await pool.query('SELECT * FROM dishes WHERE id = \$1', [id]);
+    if (current.rows.length === 0) return res.status(404).json({ error: 'Plato no encontrado' });
+    const dish = current.rows[0];
+
+    let imageUrl = dish.image;
+    if (req.file) {
+      imageUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    }
+
+    const query = `
+      UPDATE dishes 
+      SET name = $1, category = $2, price = $3, description = $4, image = $5, available = $6 
+      WHERE id = $7 RETURNING *;
+    `;
+    const values = [
+      name || dish.name,
+      category || dish.category,
+      price ? Number(price) : dish.price,
+      description !== undefined ? description : dish.description,
+      imageUrl,
+      available !== undefined ? (available === 'true' || available === true) : dish.available,
+      id
+    ];
+
+    const updated = await pool.query(query, values);
+    res.json({ message: 'Plato actualizado', dish: updated.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.delete('/api/dishes/:id', (req, res) => {
-  const { id } = req.params;
-  let dishes = readJSON(dishesPath);
-  const filtered = dishes.filter(d => String(d.id) !== String(id));
-  writeJSON(dishesPath, filtered);
-  res.json({ message: 'Plato eliminado' });
+app.patch('/api/dishes/:id/toggle-available', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const current = await pool.query('SELECT available FROM dishes WHERE id = \$1', [id]);
+    if (current.rows.length === 0) return res.status(404).json({ error: 'Plato no encontrado' });
+
+    const newStatus = !current.rows[0].available;
+    await pool.query('UPDATE dishes SET available = \$1 WHERE id = \$2', [newStatus, id]);
+
+    res.json({ message: 'Estado actualizado', available: newStatus });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/dishes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM dishes WHERE id = \$1', [id]);
+    res.json({ message: 'Plato eliminado' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // --- RUTAS PEDIDOS ---
-app.get('/api/orders', (req, res) => res.json(readJSON(ordersPath)));
-
-app.post('/api/orders', (req, res) => {
-  const { clientName, address, items, total } = req.body;
-  const orders = readJSON(ordersPath);
-  const newOrder = {
-    id: `ORD-${Date.now()}`,
-    clientName,
-    address,
-    items,
-    total,
-    status: 'Pending',
-    createdAt: new Date().toISOString()
-  };
-  orders.push(newOrder);
-  writeJSON(ordersPath, orders);
-  res.status(201).json({ message: 'Pedido registrado', order: newOrder });
+app.get('/api/orders', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.patch('/api/orders/:id/status', (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
-  let orders = readJSON(ordersPath);
-  const index = orders.findIndex(o => String(o.id) === String(id));
-  if (index === -1) return res.status(404).json({ error: 'Pedido no encontrado' });
+app.post('/api/orders', async (req, res) => {
+  try {
+    const { clientName, address, items, total } = req.body;
+    const orderId = `ORD-${Date.now()}`;
+    const query = `
+      INSERT INTO orders (id, client_name, address, items, total, status) 
+      VALUES ($1, $2, $3, $4, $5, 'Pending') RETURNING *;
+    `;
+    const values = [orderId, clientName, address, JSON.stringify(items), Number(total)];
+    const newOrder = await pool.query(query, values);
 
-  orders[index].status = status;
-  writeJSON(ordersPath, orders);
-  res.json({ message: 'Estado del pedido actualizado', order: orders[index] });
+    res.status(201).json({ message: 'Pedido registrado', order: newOrder.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/orders/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const updated = await pool.query('UPDATE orders SET status = \$1 WHERE id = \$2 RETURNING *;', [status, id]);
+    if (updated.rows.length === 0) return res.status(404).json({ error: 'Pedido no encontrado' });
+
+    res.json({ message: 'Estado del pedido actualizado', order: updated.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.listen(PORT, () => console.log(`🚀 Sèvè Dorce Resto ap mache sou pò: ${PORT}`));
